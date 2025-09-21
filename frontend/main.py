@@ -13,6 +13,7 @@ import asyncio
 import json
 import time
 from typing import Dict, List, Optional
+import numpy as np
 
 # Configure Streamlit page
 st.set_page_config(
@@ -211,7 +212,7 @@ def main():
         
         # Generate sample performance data
         dates = pd.date_range(start='2024-01-01', end='2024-09-20', freq='D')
-        np_random = pd.np.random.RandomState(42)
+        np_random = np.random.RandomState(42)
         
         performance_data = pd.DataFrame({
             'Date': dates,
