@@ -1,0 +1,47 @@
+# DecentralFund DAO - Backend Dockerfile
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    libpq-dev \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install additional blockchain dependencies
+RUN pip install --no-cache-dir web3 eth-account py-solc-x
+
+# Create non-root user
+RUN groupadd -r decentralfund && useradd -r -g decentralfund decentralfund
+
+# Copy application code
+COPY --chown=decentralfund:decentralfund . .
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/data /app/static
+RUN chown -R decentralfund:decentralfund /app
+
+# Switch to non-root user
+USER decentralfund
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Default command
+CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000"]

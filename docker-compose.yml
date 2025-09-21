@@ -1,0 +1,338 @@
+version: "3.8"
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: decentralfund_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: decentralfund_dao
+      POSTGRES_USER: decentralfund
+      POSTGRES_PASSWORD: decentralfund_password_change_in_production
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U decentralfund"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cache & Message Broker
+  redis:
+    image: redis:7-alpine
+    container_name: decentralfund_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass redis_password_change_in_production
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: decentralfund_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://decentralfund:decentralfund_password_change_in_production@postgres:5432/decentralfund_dao
+      - REDIS_URL=redis://:redis_password_change_in_production@redis:6379
+      - WEB3_PROVIDER_URL=http://ganache:8545
+      - ENVIRONMENT=development
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - CELERY_BROKER_URL=redis://:redis_password_change_in_production@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:redis_password_change_in_production@redis:6379/0
+    volumes:
+      - ./backend:/app/backend
+      - ./contracts:/app/contracts
+      - ./scripts:/app/scripts
+      - logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        python scripts/migrate_db.py &&
+        echo 'Starting backend server...' &&
+        uvicorn backend.app:app --host 0.0.0.0 --port 8000 --reload
+      "
+
+  # Frontend Dashboard
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: decentralfund_frontend
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - API_BASE_URL=http://backend:8000/api
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    volumes:
+      - ./frontend:/app/frontend
+      - ./static:/app/static
+    depends_on:
+      backend:
+        condition: service_healthy
+    command: streamlit run frontend/main.py --server.port 8501 --server.address 0.0.0.0
+
+  # Background Worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: decentralfund_worker
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://decentralfund:decentralfund_password_change_in_production@postgres:5432/decentralfund_dao
+      - REDIS_URL=redis://:redis_password_change_in_production@redis:6379
+      - WEB3_PROVIDER_URL=http://ganache:8545
+      - CELERY_BROKER_URL=redis://:redis_password_change_in_production@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:redis_password_change_in_production@redis:6379/0
+    volumes:
+      - ./backend:/app/backend
+      - ./contracts:/app/contracts
+      - logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A backend.tasks worker --loglevel=info --concurrency=2
+
+  # Celery Beat Scheduler
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: decentralfund_scheduler
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://decentralfund:decentralfund_password_change_in_production@postgres:5432/decentralfund_dao
+      - REDIS_URL=redis://:redis_password_change_in_production@redis:6379
+      - CELERY_BROKER_URL=redis://:redis_password_change_in_production@redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:redis_password_change_in_production@redis:6379/0
+    volumes:
+      - ./backend:/app/backend
+      - logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A backend.tasks beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+
+  # Local Ethereum Node (for development)
+  ganache:
+    image: trufflesuite/ganache:v7.9.1
+    container_name: decentralfund_ganache
+    restart: unless-stopped
+    ports:
+      - "8545:8545"
+    command: >
+      ganache
+      --host 0.0.0.0
+      --port 8545
+      --chainId 1337
+      --networkId 1337
+      --accounts 10
+      --deterministic
+      --mnemonic "candy maple cake sugar pudding cream honey rich smooth crumble sweet treat"
+      --gasLimit 12000000
+      --gasPrice 1000000000
+    volumes:
+      - ganache_data:/app/data
+
+  # NGINX Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: decentralfund_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - static_files:/var/www/static
+    depends_on:
+      - backend
+      - frontend
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://localhost/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: decentralfund_prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/etc/prometheus/console_libraries"
+      - "--web.console.templates=/etc/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  # Grafana Dashboard
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: decentralfund_grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin_change_in_production
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  # Elasticsearch for Logging
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: decentralfund_elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+
+  # Kibana for Log Visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: decentralfund_kibana
+    restart: unless-stopped
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+
+  # Logstash for Log Processing
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.11.0
+    container_name: decentralfund_logstash
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./monitoring/logstash/config:/usr/share/logstash/config:ro
+      - logs:/var/log/decentralfund:ro
+    depends_on:
+      - elasticsearch
+
+  # PgAdmin for Database Management
+  pgadmin:
+    image: dpage/pgadmin4:8.0
+    container_name: decentralfund_pgadmin
+    restart: unless-stopped
+    ports:
+      - "5050:80"
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@decentralfund.dao
+      - PGADMIN_DEFAULT_PASSWORD=admin_change_in_production
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+
+  # Redis Commander for Redis Management
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: decentralfund_redis_commander
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379:0:redis_password_change_in_production
+    depends_on:
+      - redis
+
+  # Flower for Celery Monitoring
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: decentralfund_flower
+    restart: unless-stopped
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://:redis_password_change_in_production@redis:6379/0
+    command: celery -A backend.tasks flower --port=5555
+    depends_on:
+      - redis
+
+# Named Volumes
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  ganache_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  elasticsearch_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+  static_files:
+    driver: local
+  logs:
+    driver: local
+
+# Network Configuration
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
