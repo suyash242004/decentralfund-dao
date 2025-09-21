@@ -322,7 +322,7 @@ def main():
                 
                 duration = st.selectbox(
                     "Investment Duration",
-                    ["3 months", "6 months", "1 year", "2 years", "Unlimited"],
+                    ["3 months", "6 months", "1 year", "2 years", "5 years", "Unlimited"],
                     index=2,
                     help="How long you want to continue the SIP"
                 )
